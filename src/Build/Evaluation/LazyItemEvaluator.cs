@@ -562,7 +562,7 @@ namespace Microsoft.Build.Evaluation
             {
                 // Expand properties here, because a property may have a value which is an item reference (ie "@(Bar)"), and
                 //  if so we need to add the right item reference
-                string evaluatedExclude = _expander.ExpandIntoStringLeaveEscaped(itemElement.Exclude, ExpanderOptions.ExpandProperties, itemElement.ExcludeLocation);
+                string evaluatedExclude = _expander.ExpandIntoStringLeaveEscaped(itemElement.Exclude, ExpanderOptions.ExpandProperties, itemElement.ExcludeLocation, _loggingContext);
 
                 if (evaluatedExclude.Length > 0)
                 {
@@ -591,7 +591,7 @@ namespace Microsoft.Build.Evaluation
             // Process MatchOnMetadata
             if (itemElement.MatchOnMetadata.Length > 0)
             {
-                string evaluatedmatchOnMetadata = _expander.ExpandIntoStringLeaveEscaped(itemElement.MatchOnMetadata, ExpanderOptions.ExpandProperties, itemElement.MatchOnMetadataLocation);
+                string evaluatedmatchOnMetadata = _expander.ExpandIntoStringLeaveEscaped(itemElement.MatchOnMetadata, ExpanderOptions.ExpandProperties, itemElement.MatchOnMetadataLocation, _loggingContext);
 
                 if (evaluatedmatchOnMetadata.Length > 0)
                 {
@@ -600,7 +600,7 @@ namespace Microsoft.Build.Evaluation
                     foreach (var matchOnMetadataSplit in matchOnMetadataSplits)
                     {
                         AddItemReferences(matchOnMetadataSplit, operationBuilder, itemElement.MatchOnMetadataLocation);
-                        string metadataExpanded = _expander.ExpandIntoStringLeaveEscaped(matchOnMetadataSplit, ExpanderOptions.ExpandPropertiesAndItems, itemElement.MatchOnMetadataLocation);
+                        string metadataExpanded = _expander.ExpandIntoStringLeaveEscaped(matchOnMetadataSplit, ExpanderOptions.ExpandPropertiesAndItems, itemElement.MatchOnMetadataLocation, _loggingContext);
                         var metadataSplits = ExpressionShredder.SplitSemiColonSeparatedList(metadataExpanded);
                         operationBuilder.MatchOnMetadata.AddRange(metadataSplits);
                     }
@@ -649,7 +649,8 @@ namespace Microsoft.Build.Evaluation
                 yield return expander.ExpandIntoStringLeaveEscaped(
                     metadatumElement.Condition,
                     expanderOptions,
-                    metadatumElement.ConditionLocation);
+                    metadatumElement.ConditionLocation,
+                    loggingContext);
             }
         }
 

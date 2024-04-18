@@ -9,21 +9,24 @@ using System.Threading.Tasks;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.BuildCheck.Acquisition;
 using Microsoft.Build.BuildCheck.Logging;
+using Microsoft.Build.Evaluation;
 using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Framework;
+using Microsoft.Build.Shared;
 
 namespace Microsoft.Build.BuildCheck.Infrastructure;
 
-internal class NullBuildCheckManager : IBuildCheckManager
+internal class NullBuildCheckManager : IBuildCheckManager, IBuildEngineDataConsumer
 {
     public void Shutdown() { }
+
+    public void ProcessAnalyzerAcquisition(AnalyzerAcquisitionData acquisitionData) { }
 
     public void ProcessEvaluationFinishedEventArgs(AnalyzerLoggingContext buildAnalysisContext,
         ProjectEvaluationFinishedEventArgs projectEvaluationFinishedEventArgs)
     { }
 
     public void SetDataSource(BuildCheckDataSource buildCheckDataSource) { }
-    public void ProcessAnalyzerAcquisition(AnalyzerAcquisitionData acquisitionData) { }
 
     public Dictionary<string, TimeSpan> CreateTracingStats() => throw new NotImplementedException();
 
@@ -40,12 +43,13 @@ internal class NullBuildCheckManager : IBuildCheckManager
     public void StartProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext)
     { }
 
-    public void EndProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext)
+    public void EndProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext, string fullPath)
     { }
 
-    public void YieldProject(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext)
+    public void ProcessPropertyRead(string propertyName, int startIndex, int endIndex, IMsBuildElementLocation elementLocation,
+        bool isUninitialized, PropertyReadContext propertyReadContext, BuildEventContext? buildEventContext)
     { }
 
-    public void ResumeProject(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext)
+    public void ProcessPropertyWrite(string propertyName, bool isEmpty, IMsBuildElementLocation? elementLocation, BuildEventContext? buildEventContext)
     { }
 }

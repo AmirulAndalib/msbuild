@@ -56,7 +56,7 @@ internal sealed class BuildCheckConnectorLogger(IBuildAnalysisLoggingContextFact
         }
         else if (e is ProjectFinishedEventArgs projectFinishedEventArgs)
         {
-            buildCheckManager.EndProjectRequest(BuildCheckDataSource.EventArgs, e.BuildEventContext!);
+            buildCheckManager.EndProjectRequest(BuildCheckDataSource.EventArgs, e.BuildEventContext!, projectFinishedEventArgs.ProjectFile!);
         }
         else if (e is BuildCheckEventArgs buildCheckBuildEventArgs)
         {

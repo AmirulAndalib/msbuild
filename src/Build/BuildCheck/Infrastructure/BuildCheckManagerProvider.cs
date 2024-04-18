@@ -37,6 +37,9 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
     internal static IBuildCheckManager GlobalInstance => s_globalInstance ?? throw new InvalidOperationException("BuildCheckManagerProvider not initialized");
 
     public IBuildCheckManager Instance => GlobalInstance;
+	
+	public IBuildEngineDataConsumer BuildEngineDataConsumer => (IBuildEngineDataConsumer)GlobalInstance;
+    public static IBuildEngineDataConsumer? GlobalBuildEngineDataConsumer => (IBuildEngineDataConsumer?)s_globalInstance;
 
     internal static IBuildComponent CreateComponent(BuildComponentType type)
     {
@@ -68,8 +71,7 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
 
     public void ShutdownComponent() => GlobalInstance.Shutdown();
 
-
-    private sealed class BuildCheckManager : IBuildCheckManager
+    private sealed class BuildCheckManager : IBuildCheckManager, IBuildEngineDataConsumer
     {
         private readonly TracingReporter _tracingReporter = new TracingReporter();
         private readonly BuildCheckCentralContext _buildCheckCentralContext = new();
@@ -126,15 +128,23 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
         }
 
         private static T Construct<T>() where T : new() => new();
-        private static readonly (string[] ruleIds, bool defaultEnablement, BuildAnalyzerFactory factory)[][] s_builtInFactoriesPerDataSource =
-        [
-            // BuildCheckDataSource.EventArgs
+
+        private static readonly (string[] ruleIds, bool defaultEnablement, BuildAnalyzerFactory factory)[][]
+            s_builtInFactoriesPerDataSource =
             [
-                ([SharedOutputPathAnalyzer.SupportedRule.Id], SharedOutputPathAnalyzer.SupportedRule.DefaultConfiguration.IsEnabled ?? false, Construct<SharedOutputPathAnalyzer>)
-            ],
-            // BuildCheckDataSource.Execution
-            []
-        ];
+                // BuildCheckDataSource.EventArgs
+                [
+                    ([SharedOutputPathAnalyzer.SupportedRule.Id],
+                        SharedOutputPathAnalyzer.SupportedRule.DefaultConfiguration.IsEnabled ?? false,
+                        Construct<SharedOutputPathAnalyzer>)
+                ],
+                // BuildCheckDataSource.Execution
+                [
+                    (PropertiesUsageAnalyzer.SupportedRulesList.Select(r => r.Id).ToArray(),
+                        PropertiesUsageAnalyzer.SupportedRulesList.Any(r => r.DefaultConfiguration.IsEnabled ?? false),
+                        Construct<PropertiesUsageAnalyzer>)
+                ]
+            ];
 
         private void RegisterBuiltInAnalyzers(BuildCheckDataSource buildCheckDataSource)
         {
@@ -230,7 +240,14 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
                 // Create the wrapper and register to central context
                 wrapper.StartNewProject(projectFullPath, configurations);
                 var wrappedContext = new BuildCheckRegistrationContext(wrapper, _buildCheckCentralContext);
-                analyzer.RegisterActions(wrappedContext);
+                if (analyzer is InternalBuildAnalyzer internalAnalyzer)
+                {
+                    internalAnalyzer.RegisterInternalActions(wrappedContext);
+                }
+                else
+                {
+                    analyzer.RegisterActions(wrappedContext);
+                }
             }
             else
             {
@@ -326,6 +343,12 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
             loggingContext.LogBuildEvent(eventArgs);
         }
 
+        // TODO: those would not work properly in multi-threaded environment, with multiple projects being evaluated/executed at once
+        //  This should be handled together with the Provider singleton - all the calling paths should be inspected and the context propagated properly
+        private BuildEventContext? _executionEngineBuildEventContext;
+        private string? _executingEngineProjectFullPath;
+        private const string _defaultProjectFullPath = "Unknown_Project";
+		
         public void StartProjectEvaluation(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext,
             string fullPath)
         {
@@ -335,6 +358,12 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
                 // This is because in-proc node has the BuildEventArgs source and BuildExecution source
                 //  both in a single manager. The project started is first encountered by the execution before the EventArg is sent
                 return;
+            }
+
+            if (buildCheckDataSource == BuildCheckDataSource.BuildExecution)
+            {
+                _executionEngineBuildEventContext = buildEventContext;
+                _executingEngineProjectFullPath = fullPath;
             }
 
             SetupAnalyzersForNewProject(fullPath, buildEventContext);
@@ -355,8 +384,52 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
         {
         }
 
-        public void EndProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext)
+        public void EndProjectRequest(
+            BuildCheckDataSource buildCheckDataSource,
+            BuildEventContext buildEventContext,
+            string fullPath)
         {
+            AnalyzerLoggingContext loggingContext = new(_loggingService, buildEventContext);
+            _buildEventsProcessor.ProcessProjectDone(loggingContext, fullPath);
+            _executionEngineBuildEventContext = null;
+            _executingEngineProjectFullPath = null;
+        }
+
+        public void ProcessPropertyRead(
+            string propertyName,
+            int startIndex,
+            int endIndex,
+            IMsBuildElementLocation elementLocation,
+            bool isUninitialized,
+            PropertyReadContext propertyReadContext,
+            BuildEventContext? buildEventContext)
+        {
+            if (!_buildCheckCentralContext.HasPropertyReadActions)
+            {
+                return;
+            }
+
+            AnalyzerLoggingContext loggingContext =
+                new(_loggingService, buildEventContext ?? _executionEngineBuildEventContext ?? BuildEventContext.Invalid);
+            _buildEventsProcessor.ProcessPropertyRead(_executingEngineProjectFullPath ?? _defaultProjectFullPath, propertyName, startIndex, endIndex, elementLocation,
+                isUninitialized, propertyReadContext, loggingContext);
+        }
+
+        public void ProcessPropertyWrite(
+            string propertyName,
+            bool isEmpty,
+            IMsBuildElementLocation? elementLocation,
+            BuildEventContext? buildEventContext)
+        {
+            if (!_buildCheckCentralContext.HasPropertyWriteActions)
+            {
+                return;
+            }
+
+            AnalyzerLoggingContext loggingContext =
+                new(_loggingService,
+                    buildEventContext ?? _executionEngineBuildEventContext ?? BuildEventContext.Invalid);
+            _buildEventsProcessor.ProcessPropertyWrite(_executingEngineProjectFullPath ?? _defaultProjectFullPath, propertyName, isEmpty, elementLocation, loggingContext);
         }
 
         public void Shutdown()
@@ -370,7 +443,20 @@ internal sealed class BuildCheckManagerProvider : IBuildCheckManagerProvider
             public BuildAnalyzerWrapperFactory Factory { get; init; } = configContext =>
             {
                 BuildAnalyzer ba = factory();
-                ba.Initialize(configContext);
+                try
+                {
+                    ba.Initialize(configContext);
+                }
+                catch (BuildCheckConfigurationException)
+                {
+                    throw;
+                }
+                catch (Exception e)
+                {
+                    throw new BuildCheckConfigurationException(
+                        $"The analyzer '{ba.FriendlyName}' failed to initialize: {e.Message}", e);
+                }
+                
                 return new BuildAnalyzerWrapper(ba);
             };
             public BuildAnalyzerWrapper? MaterializedAnalyzer { get; set; }

@@ -9,11 +9,11 @@ using System.Threading.Tasks;
 using Microsoft.Build.BackEnd;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.BuildCheck.Acquisition;
-using Microsoft.Build.BuildCheck.Infrastructure;
 using Microsoft.Build.BuildCheck.Logging;
+using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Framework;
 
-namespace Microsoft.Build.Experimental.BuildCheck;
+namespace Microsoft.Build.BuildCheck.Infrastructure;
 
 internal enum BuildCheckDataSource
 {
@@ -48,7 +48,7 @@ internal interface IBuildCheckManager
     void StartProjectEvaluation(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext, string fullPath);
     void EndProjectEvaluation(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext);
     void StartProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext);
-    void EndProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext);
+    void EndProjectRequest(BuildCheckDataSource buildCheckDataSource, BuildEventContext buildEventContext, string fullPath);
 
     void Shutdown();
 }
