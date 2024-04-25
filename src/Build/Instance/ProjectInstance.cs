@@ -14,6 +14,7 @@ using System.Xml;
 using Microsoft.Build.BackEnd;
 using Microsoft.Build.BackEnd.Logging;
 using Microsoft.Build.BackEnd.SdkResolution;
+using Microsoft.Build.BuildCheck.Logging;
 using Microsoft.Build.Collections;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Definition;
@@ -57,6 +58,12 @@ namespace Microsoft.Build.Execution
         /// create project instance with some look up table that improves performance
         /// </summary>
         ImmutableWithFastItemLookup = Immutable | 0x2
+    }
+
+    internal interface IDataConsumingContext
+    {
+        public ILoggingService LoggingService { get; }
+        public string ProjectPath { get; }
     }
 
     /// <summary>
@@ -382,7 +389,7 @@ namespace Microsoft.Build.Execution
             {
                 this.EvaluatedItemElements.Add(item.Xml);
             }
-
+            
             _usingDifferentToolsVersionFromProjectFile = false;
             _originalProjectToolsVersion = project.ToolsVersion;
             _explicitToolsVersionSpecified = project.SubToolsetVersion != null;
@@ -1526,7 +1533,7 @@ namespace Microsoft.Build.Execution
         /// Only called during evaluation, so does not check for immutability.
         /// </summary>
         void IEvaluatorData<ProjectPropertyInstance, ProjectItemInstance, ProjectMetadataInstance, ProjectItemDefinitionInstance>.
-            InitializeForEvaluation(IToolsetProvider toolsetProvider, EvaluationContext evaluationContext)
+            InitializeForEvaluation(IToolsetProvider toolsetProvider, EvaluationContext evaluationContext, LoggingContext loggingContext)
         {
             // All been done in the constructor.  We don't allow re-evaluation of project instances.
         }
@@ -2059,7 +2066,8 @@ namespace Microsoft.Build.Execution
         /// </comment>
         public string ExpandString(string unexpandedValue)
         {
-            Expander<ProjectPropertyInstance, ProjectItemInstance> expander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(this, this, FileSystems.Default);
+            // possibly logging service (but might save the evaluationcontext - no it's invalidated after eval done)
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(this, this, FileSystems.Default, _loggingContext);
 
             string result = expander.ExpandIntoStringAndUnescape(unexpandedValue, ExpanderOptions.ExpandPropertiesAndItems, ProjectFileLocation);
 
@@ -2077,7 +2085,7 @@ namespace Microsoft.Build.Execution
         /// </comment>
         public bool EvaluateCondition(string condition)
         {
-            Expander<ProjectPropertyInstance, ProjectItemInstance> expander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(this, this, FileSystems.Default);
+            Expander<ProjectPropertyInstance, ProjectItemInstance> expander = new Expander<ProjectPropertyInstance, ProjectItemInstance>(this, this, FileSystems.Default, _loggingContext);
 
             bool result = ConditionEvaluator.EvaluateCondition(
                 condition,
@@ -2086,9 +2094,8 @@ namespace Microsoft.Build.Execution
                 ExpanderOptions.ExpandPropertiesAndItems,
                 Directory,
                 ProjectFileLocation,
-                null /* no logging service */,
-                BuildEventContext.Invalid,
-                FileSystems.Default);
+                FileSystems.Default,
+                this._loggingContext);
 
             return result;
         }
@@ -2852,6 +2859,12 @@ namespace Microsoft.Build.Execution
         }
 
         /// <summary>
+        /// Logging context - set during the evaluation.
+        /// Can be null - especially if the project was fetched from the cache.
+        /// </summary>
+        private LoggingContext _loggingContext;
+
+        /// <summary>
         /// Common code for the constructors that evaluate directly.
         /// Global properties may be null.
         /// Tools version may be null.
@@ -2891,6 +2904,7 @@ namespace Microsoft.Build.Execution
             _itemDefinitions = new RetrievableEntryHashSet<ProjectItemDefinitionInstance>(MSBuildNameIgnoreCaseComparer.Default);
             _hostServices = buildParameters.HostServices;
             this.ProjectRootElementCache = buildParameters.ProjectRootElementCache;
+            _loggingContext = new AnalyzerLoggingContext(loggingService, buildEventContext);
 
             this.EvaluatedItemElements = new List<ProjectItemElement>();
 

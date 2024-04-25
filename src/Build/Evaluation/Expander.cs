@@ -315,6 +315,8 @@ namespace Microsoft.Build.Evaluation
 
         private readonly IFileSystem _fileSystem;
 
+        private readonly LoggingContext _loggingContext;
+
         /// <summary>
         /// Non-null if the expander was constructed for evaluation.
         /// </summary>
@@ -324,31 +326,44 @@ namespace Microsoft.Build.Evaluation
         /// Creates an expander passing it some properties to use.
         /// Properties may be null.
         /// </summary>
-        internal Expander(IPropertyProvider<P> properties, IFileSystem fileSystem)
+        internal Expander(IPropertyProvider<P> properties, IFileSystem fileSystem, LoggingContext loggingContext)
         {
             _properties = properties;
             _propertiesUsageTracker = new PropertiesUsageTracker();
             _fileSystem = fileSystem;
+            _loggingContext = loggingContext;
         }
+
+        /// <summary>
+        /// Creates an expander passing it some properties to use.
+        /// Properties may be null.
+        ///
+        /// Used for tests and for ToolsetReader - that operates agnostic on the project
+        ///   - so no logging context is passed, and no BuildCheck analysis will be executed.
+        /// </summary>
+        internal Expander(IPropertyProvider<P> properties, IFileSystem fileSystem)
+        : this(properties, fileSystem, null)
+        { }
 
         /// <summary>
         /// Creates an expander passing it some properties to use and the evaluation context.
         /// Properties may be null.
         /// </summary>
-        internal Expander(IPropertyProvider<P> properties, EvaluationContext evaluationContext)
+        internal Expander(IPropertyProvider<P> properties, EvaluationContext evaluationContext, LoggingContext loggingContext)
         {
             _properties = properties;
             _propertiesUsageTracker = new PropertiesUsageTracker();
             _fileSystem = evaluationContext.FileSystem;
             EvaluationContext = evaluationContext;
+            _loggingContext = loggingContext;
         }
 
         /// <summary>
         /// Creates an expander passing it some properties and items to use.
         /// Either or both may be null.
         /// </summary>
-        internal Expander(IPropertyProvider<P> properties, IItemProvider<I> items, IFileSystem fileSystem)
-            : this(properties, fileSystem)
+        internal Expander(IPropertyProvider<P> properties, IItemProvider<I> items, IFileSystem fileSystem, LoggingContext loggingContext)
+            : this(properties, fileSystem, loggingContext)
         {
             _items = items;
         }
@@ -357,8 +372,8 @@ namespace Microsoft.Build.Evaluation
         /// Creates an expander passing it some properties and items to use, and the evaluation context.
         /// Either or both may be null.
         /// </summary>
-        internal Expander(IPropertyProvider<P> properties, IItemProvider<I> items, EvaluationContext evaluationContext)
-            : this(properties, evaluationContext)
+        internal Expander(IPropertyProvider<P> properties, IItemProvider<I> items, EvaluationContext evaluationContext, LoggingContext loggingContext)
+            : this(properties, evaluationContext, loggingContext)
         {
             _items = items;
         }
@@ -367,8 +382,23 @@ namespace Microsoft.Build.Evaluation
         /// Creates an expander passing it some properties, items, and/or metadata to use.
         /// Any or all may be null.
         /// </summary>
+        internal Expander(IPropertyProvider<P> properties, IItemProvider<I> items, IMetadataTable metadata, IFileSystem fileSystem, LoggingContext loggingContext)
+            : this(properties, items, fileSystem, loggingContext)
+        {
+            _metadata = metadata;
+        }
+
+        /// <summary>
+        /// Creates an expander passing it some properties, items, and/or metadata to use.
+        /// Any or all may be null.
+        ///
+        /// This is for the purpose of evaluations through API calls, that might not be able to pass the logging context
+        ///  - BuildCheck analysis won't be executed for those.
+        /// (for one of the calls we can actually pass IDataConsumingContext - as we have logging service and project)
+        /// 
+        /// </summary>
         internal Expander(IPropertyProvider<P> properties, IItemProvider<I> items, IMetadataTable metadata, IFileSystem fileSystem)
-            : this(properties, items, fileSystem)
+            : this(properties, items, fileSystem, null)
         {
             _metadata = metadata;
         }
@@ -2281,14 +2311,6 @@ namespace Microsoft.Build.Evaluation
                 }
 
                 /// <summary>
-                /// Intrinsic function that returns the number of items in the list.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> Count(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    yield return new KeyValuePair<string, S>(Convert.ToString(itemsOfType.Count(), CultureInfo.InvariantCulture), null /* no base item */);
-                }
-
-                /// <summary>
                 /// Intrinsic function that returns the specified built-in modifer value of the items in itemsOfType
                 /// Tuple is {current item include, item under transformation}.
                 /// </summary>
@@ -2334,566 +2356,6 @@ namespace Microsoft.Build.Evaluation
                         {
                             yield return new KeyValuePair<string, S>(null, item.Value);
                         }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns the subset of items that actually exist on disk.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> Exists(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments == null || arguments.Length == 0, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (String.IsNullOrEmpty(item.Key))
-                        {
-                            continue;
-                        }
-
-                        // Unescape as we are passing to the file system
-                        string unescapedPath = EscapingUtilities.UnescapeAll(item.Key);
-
-                        string rootedPath = null;
-                        try
-                        {
-                            // If we're a projectitem instance then we need to get
-                            // the project directory and be relative to that
-                            if (Path.IsPathRooted(unescapedPath))
-                            {
-                                rootedPath = unescapedPath;
-                            }
-                            else
-                            {
-                                // If we're not a ProjectItem or ProjectItemInstance, then ProjectDirectory will be null.
-                                // In that case, we're safe to get the current directory as we'll be running on TaskItems which
-                                // only exist within a target where we can trust the current directory
-                                string baseDirectoryToUse = item.Value.ProjectDirectory ?? String.Empty;
-                                rootedPath = Path.Combine(baseDirectoryToUse, unescapedPath);
-                            }
-                        }
-                        catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
-                        {
-                            ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "InvalidItemFunctionExpression", functionName, item.Key, e.Message);
-                        }
-
-                        if (File.Exists(rootedPath) || Directory.Exists(rootedPath))
-                        {
-                            yield return item;
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that combines the existing paths of the input items with a given relative path.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> Combine(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 1, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    string relativePath = arguments[0];
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (String.IsNullOrEmpty(item.Key))
-                        {
-                            continue;
-                        }
-
-                        // Unescape as we are passing to the file system
-                        string unescapedPath = EscapingUtilities.UnescapeAll(item.Key);
-                        string combinedPath = Path.Combine(unescapedPath, relativePath);
-                        string escapedPath = EscapingUtilities.Escape(combinedPath);
-                        yield return new KeyValuePair<string, S>(escapedPath, null);
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns all ancestor directories of the given items.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> GetPathsOfAllDirectoriesAbove(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments == null || arguments.Length == 0, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    // Phase 1: find all the applicable directories.
-
-                    SortedSet<string> directories = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (String.IsNullOrEmpty(item.Key))
-                        {
-                            continue;
-                        }
-
-                        string directoryName = null;
-
-                        // Unescape as we are passing to the file system
-                        string unescapedPath = EscapingUtilities.UnescapeAll(item.Key);
-
-                        try
-                        {
-                            string rootedPath;
-
-                            // If we're a projectitem instance then we need to get
-                            // the project directory and be relative to that
-                            if (Path.IsPathRooted(unescapedPath))
-                            {
-                                rootedPath = unescapedPath;
-                            }
-                            else
-                            {
-                                // If we're not a ProjectItem or ProjectItemInstance, then ProjectDirectory will be null.
-                                // In that case, we're safe to get the current directory as we'll be running on TaskItems which
-                                // only exist within a target where we can trust the current directory
-                                string baseDirectoryToUse = item.Value.ProjectDirectory ?? String.Empty;
-                                rootedPath = Path.Combine(baseDirectoryToUse, unescapedPath);
-                            }
-
-                            // Normalize the path to remove elements like "..".
-                            // Otherwise we run the risk of returning two or more different paths that represent the
-                            // same directory.
-                            rootedPath = FileUtilities.NormalizePath(rootedPath);
-                            directoryName = Path.GetDirectoryName(rootedPath);
-                        }
-                        catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
-                        {
-                            ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "InvalidItemFunctionExpression", functionName, item.Key, e.Message);
-                        }
-
-                        while (!String.IsNullOrEmpty(directoryName))
-                        {
-                            if (directories.Contains(directoryName))
-                            {
-                                // We've already got this directory (and all its ancestors) in the set.
-                                break;
-                            }
-
-                            directories.Add(directoryName);
-                            directoryName = Path.GetDirectoryName(directoryName);
-                        }
-                    }
-
-                    // Phase 2: Go through the directories and return them in order
-
-                    foreach (string directoryPath in directories)
-                    {
-                        string escapedDirectoryPath = EscapingUtilities.Escape(directoryPath);
-                        yield return new KeyValuePair<string, S>(escapedDirectoryPath, null);
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns the DirectoryName of the items in itemsOfType
-                /// UNDONE: This can be removed in favor of a built-in %(DirectoryName) metadata in future.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> DirectoryName(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments == null || arguments.Length == 0, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    Dictionary<string, string> directoryNameTable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        // If the item include has become empty,
-                        // this is the end of the pipeline for this item
-                        if (String.IsNullOrEmpty(item.Key))
-                        {
-                            continue;
-                        }
-
-                        string directoryName;
-                        if (!directoryNameTable.TryGetValue(item.Key, out directoryName))
-                        {
-                            // Unescape as we are passing to the file system
-                            string unescapedPath = EscapingUtilities.UnescapeAll(item.Key);
-
-                            try
-                            {
-                                string rootedPath;
-
-                                // If we're a projectitem instance then we need to get
-                                // the project directory and be relative to that
-                                if (Path.IsPathRooted(unescapedPath))
-                                {
-                                    rootedPath = unescapedPath;
-                                }
-                                else
-                                {
-                                    // If we're not a ProjectItem or ProjectItemInstance, then ProjectDirectory will be null.
-                                    // In that case, we're safe to get the current directory as we'll be running on TaskItems which
-                                    // only exist within a target where we can trust the current directory
-                                    string baseDirectoryToUse = item.Value.ProjectDirectory ?? String.Empty;
-                                    rootedPath = Path.Combine(baseDirectoryToUse, unescapedPath);
-                                }
-
-                                directoryName = Path.GetDirectoryName(rootedPath);
-                            }
-                            catch (Exception e) when (ExceptionHandling.IsIoRelatedException(e))
-                            {
-                                ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "InvalidItemFunctionExpression", functionName, item.Key, e.Message);
-                            }
-
-                            // Escape as this is going back into the engine
-                            directoryName = EscapingUtilities.Escape(directoryName);
-                            directoryNameTable[unescapedPath] = directoryName;
-                        }
-
-                        if (!String.IsNullOrEmpty(directoryName))
-                        {
-                            // return a result through the enumerator
-                            yield return new KeyValuePair<string, S>(directoryName, item.Value);
-                        }
-                        else if (includeNullEntries)
-                        {
-                            yield return new KeyValuePair<string, S>(null, item.Value);
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns the contents of the metadata in specified in argument[0].
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> Metadata(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 1, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    string metadataName = arguments[0];
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (item.Value != null)
-                        {
-                            string metadataValue = null;
-
-                            try
-                            {
-                                metadataValue = item.Value.GetMetadataValueEscaped(metadataName);
-                            }
-                            catch (Exception ex) when (ex is ArgumentException || ex is InvalidOperationException)
-                            {
-                                // Blank metadata name
-                                ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "CannotEvaluateItemMetadata", metadataName, ex.Message);
-                            }
-
-                            if (!String.IsNullOrEmpty(metadataValue))
-                            {
-                                // It may be that the itemspec has unescaped ';'s in it so we need to split here to handle
-                                // that case.
-                                if (metadataValue.IndexOf(';') >= 0)
-                                {
-                                    var splits = ExpressionShredder.SplitSemiColonSeparatedList(metadataValue);
-
-                                    foreach (string itemSpec in splits)
-                                    {
-                                        // return a result through the enumerator
-                                        yield return new KeyValuePair<string, S>(itemSpec, item.Value);
-                                    }
-                                }
-                                else
-                                {
-                                    // return a result through the enumerator
-                                    yield return new KeyValuePair<string, S>(metadataValue, item.Value);
-                                }
-                            }
-                            else if (metadataValue != String.Empty && includeNullEntries)
-                            {
-                                yield return new KeyValuePair<string, S>(metadataValue, item.Value);
-                            }
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns only the items from itemsOfType that have distinct Item1 in the Tuple
-                /// Using a case sensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> DistinctWithCase(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    return DistinctWithComparer(expander, elementLocation, includeNullEntries, functionName, itemsOfType, arguments, StringComparer.Ordinal);
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns only the items from itemsOfType that have distinct Item1 in the Tuple
-                /// Using a case insensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> Distinct(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    return DistinctWithComparer(expander, elementLocation, includeNullEntries, functionName, itemsOfType, arguments, StringComparer.OrdinalIgnoreCase);
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns only the items from itemsOfType that have distinct Item1 in the Tuple
-                /// Using a case insensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> DistinctWithComparer(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments, StringComparer comparer)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments == null || arguments.Length == 0, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    // This dictionary will ensure that we only return one result per unique itemspec
-                    HashSet<string> seenItems = new HashSet<string>(comparer);
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (item.Key != null && seenItems.Add(item.Key))
-                        {
-                            yield return item;
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function reverses the item list.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> Reverse(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments == null || arguments.Length == 0, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-                    return itemsOfType.Reverse();
-                }
-
-                /// <summary>
-                /// Intrinsic function that transforms expressions like the %(foo) in @(Compile->'%(foo)').
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> ExpandQuotedExpressionFunction(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 1, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        MetadataMatchEvaluator matchEvaluator;
-                        string include = null;
-
-                        // If we've been handed a null entry by an uptream tranform
-                        // then we don't want to try to tranform it with an itempec modification.
-                        // Simply allow the null to be passed along (if, we are including nulls as specified by includeNullEntries
-                        if (item.Key != null)
-                        {
-                            matchEvaluator = new MetadataMatchEvaluator(item.Key, item.Value, elementLocation);
-
-                            include = RegularExpressions.ItemMetadataPattern.Value.Replace(arguments[0], matchEvaluator.GetMetadataValueFromMatch);
-                        }
-
-                        // Include may be empty. Historically we have created items with empty include
-                        // and ultimately set them on tasks, but we don't do that anymore as it's broken.
-                        // Instead we optionally add a null, so that input and output lists are the same length; this allows
-                        // the caller to possibly do correlation.
-
-                        // We pass in the existing item so we can copy over its metadata
-                        if (!string.IsNullOrEmpty(include))
-                        {
-                            yield return new KeyValuePair<string, S>(include, item.Value);
-                        }
-                        else if (includeNullEntries)
-                        {
-                            yield return new KeyValuePair<string, S>(null, item.Value);
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that transforms expressions by invoking methods of System.String on the itemspec
-                /// of the item in the pipeline.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> ExecuteStringFunction(
-                    Expander<P, I> expander,
-                    IElementLocation elementLocation,
-                    bool includeNullEntries,
-                    string functionName,
-                    IEnumerable<KeyValuePair<string, S>> itemsOfType,
-                    string[] arguments)
-                {
-                    // Transform: expression is like @(Compile->'%(foo)'), so create completely new items,
-                    // using the Include from the source items
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        Function<P> function = new Function<P>(
-                            typeof(string),
-                            item.Key,
-                            item.Key,
-                            functionName,
-                            arguments,
-                            BindingFlags.Public | BindingFlags.InvokeMethod,
-                            string.Empty,
-                            expander.PropertiesUsageTracker,
-                            expander._fileSystem);
-
-                        object result = function.Execute(item.Key, expander._properties, ExpanderOptions.ExpandAll, elementLocation);
-
-                        string include = Expander<P, I>.PropertyExpander<P>.ConvertToString(result);
-
-                        // We pass in the existing item so we can copy over its metadata
-                        if (include.Length > 0)
-                        {
-                            yield return new KeyValuePair<string, S>(include, item.Value);
-                        }
-                        else if (includeNullEntries)
-                        {
-                            yield return new KeyValuePair<string, S>(null, item.Value);
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns the items from itemsOfType with their metadata cleared, i.e. only the itemspec is retained.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> ClearMetadata(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments == null || arguments.Length == 0, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (includeNullEntries || item.Key != null)
-                        {
-                            yield return new KeyValuePair<string, S>(item.Key, null);
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns only those items that have a not-blank value for the metadata specified
-                /// Using a case insensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> HasMetadata(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 1, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    string metadataName = arguments[0];
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        string metadataValue = null;
-
-                        try
-                        {
-                            metadataValue = item.Value.GetMetadataValueEscaped(metadataName);
-                        }
-                        catch (Exception ex) when (ex is ArgumentException || ex is InvalidOperationException)
-                        {
-                            // Blank metadata name
-                            ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "CannotEvaluateItemMetadata", metadataName, ex.Message);
-                        }
-
-                        // GetMetadataValueEscaped returns empty string for missing metadata,
-                        // but IItem specifies it should return null
-                        if (!string.IsNullOrEmpty(metadataValue))
-                        {
-                            // return a result through the enumerator
-                            yield return item;
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns only those items have the given metadata value
-                /// Using a case insensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> WithMetadataValue(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 2, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    string metadataName = arguments[0];
-                    string metadataValueToFind = arguments[1];
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        string metadataValue = null;
-
-                        try
-                        {
-                            metadataValue = item.Value.GetMetadataValueEscaped(metadataName);
-                        }
-                        catch (Exception ex) when (ex is ArgumentException || ex is InvalidOperationException)
-                        {
-                            // Blank metadata name
-                            ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "CannotEvaluateItemMetadata", metadataName, ex.Message);
-                        }
-
-                        if (metadataValue != null && String.Equals(metadataValue, metadataValueToFind, StringComparison.OrdinalIgnoreCase))
-                        {
-                            // return a result through the enumerator
-                            yield return item;
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns those items don't have the given metadata value
-                /// Using a case insensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> WithoutMetadataValue(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 2, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    string metadataName = arguments[0];
-                    string metadataValueToFind = arguments[1];
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        string metadataValue = null;
-
-                        try
-                        {
-                            metadataValue = item.Value.GetMetadataValueEscaped(metadataName);
-                        }
-                        catch (Exception ex) when (ex is ArgumentException || ex is InvalidOperationException)
-                        {
-                            // Blank metadata name
-                            ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "CannotEvaluateItemMetadata", metadataName, ex.Message);
-                        }
-
-                        if (!String.Equals(metadataValue, metadataValueToFind, StringComparison.OrdinalIgnoreCase))
-                        {
-                            // return a result through the enumerator
-                            yield return item;
-                        }
-                    }
-                }
-
-                /// <summary>
-                /// Intrinsic function that returns a boolean to indicate if any of the items have the given metadata value
-                /// Using a case insensitive comparison.
-                /// </summary>
-                internal static IEnumerable<KeyValuePair<string, S>> AnyHaveMetadataValue(Expander<P, I> expander, IElementLocation elementLocation, bool includeNullEntries, string functionName, IEnumerable<KeyValuePair<string, S>> itemsOfType, string[] arguments)
-                {
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(arguments?.Length == 2, elementLocation, "InvalidItemFunctionSyntax", functionName, arguments == null ? 0 : arguments.Length);
-
-                    string metadataName = arguments[0];
-                    string metadataValueToFind = arguments[1];
-                    bool metadataFound = false;
-
-                    foreach (KeyValuePair<string, S> item in itemsOfType)
-                    {
-                        if (item.Value != null)
-                        {
-                            string metadataValue = null;
-
-                            try
-                            {
-                                metadataValue = item.Value.GetMetadataValueEscaped(metadataName);
-                            }
-                            catch (Exception ex) when (ex is ArgumentException || ex is InvalidOperationException)
-                            {
-                                // Blank metadata name
-                                ProjectErrorUtilities.ThrowInvalidProject(elementLocation, "CannotEvaluateItemMetadata", metadataName, ex.Message);
-                            }
-
-                            if (metadataValue != null && String.Equals(metadataValue, metadataValueToFind, StringComparison.OrdinalIgnoreCase))
-                            {
-                                metadataFound = true;
-
-                                // return a result through the enumerator
-                                yield return new KeyValuePair<string, S>("true", item.Value);
-
-                                // break out as soon as we found a match
-                                yield break;
-                            }
-                        }
-                    }
-
-                    if (!metadataFound)
-                    {
-                        // We did not locate an item with the required metadata
-                        yield return new KeyValuePair<string, S>("false", null);
                     }
                 }
             }
@@ -2991,43 +2453,6 @@ namespace Microsoft.Build.Evaluation
                     _itemSpec = itemSpec;
                     _sourceOfMetadata = sourceOfMetadata;
                     _elementLocation = elementLocation;
-                }
-
-                /// <summary>
-                /// Expands the metadata in the match provided into a string result.
-                /// The match is expected to be the content of a transform.
-                /// For example, representing "%(Filename.obj)" in the original expression "@(Compile->'%(Filename.obj)')".
-                /// </summary>
-                internal string GetMetadataValueFromMatch(Match match)
-                {
-                    string name = match.Groups[RegularExpressions.NameGroup].Value;
-
-                    ProjectErrorUtilities.VerifyThrowInvalidProject(match.Groups[RegularExpressions.ItemSpecificationGroup].Length == 0, _elementLocation, "QualifiedMetadataInTransformNotAllowed", match.Value, name);
-
-                    string value = null;
-                    try
-                    {
-                        if (FileUtilities.ItemSpecModifiers.IsDerivableItemSpecModifier(name))
-                        {
-                            // If we're not a ProjectItem or ProjectItemInstance, then ProjectDirectory will be null.
-                            // In that case, we're safe to get the current directory as we'll be running on TaskItems which
-                            // only exist within a target where we can trust the current directory
-                            string directoryToUse = _sourceOfMetadata.ProjectDirectory ?? Directory.GetCurrentDirectory();
-                            string definingProjectEscaped = _sourceOfMetadata.GetMetadataValueEscaped(FileUtilities.ItemSpecModifiers.DefiningProjectFullPath);
-
-                            value = FileUtilities.ItemSpecModifiers.GetItemSpecModifier(directoryToUse, _itemSpec, definingProjectEscaped, name);
-                        }
-                        else
-                        {
-                            value = _sourceOfMetadata.GetMetadataValueEscaped(name);
-                        }
-                    }
-                    catch (InvalidOperationException ex)
-                    {
-                        ProjectErrorUtilities.ThrowInvalidProject(_elementLocation, "CannotEvaluateItemMetadata", name, ex.Message);
-                    }
-
-                    return value;
                 }
             }
         }
@@ -5421,6 +4846,11 @@ namespace Microsoft.Build.Evaluation
 
             // TODO: This might get executed even before the logging service and BuildComponentCollections
             //  are initialized (for the toolset initialization)
+
+            if (BuildCheckManagerProvider.GlobalBuildEngineDataConsumer is not null && loggingContext is null)
+            {
+                Debugger.Launch();
+            }
 
             // We are collecting the read data here - instead of in the PropertyTrackingEvaluatorDataWrapper
             //  because that one is used only during evaluation, however already not from within Targets
